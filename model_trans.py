@@ -197,7 +197,7 @@ class MRN_trans_noLSTM(nn.Module):
 
         #### Add Temporal information by skip connection source: https://github.com/li-plus/DSNet/blob/main/src/anchor_based/dsnet.py
         out = self.base_model(x)
-        x = out + x
+        #x = out + x
         #x = self.layer_norm(x)
 
         for layer in self.layers:

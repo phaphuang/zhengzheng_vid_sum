@@ -167,12 +167,12 @@ def main():
             training = train_keys.copy()
             while (len(training) != 0):
                 choose_list = random.sample(training,bsz)
-                print('Batch------',b)
+                #print('Batch------',b)
                 b = b+1
                 training = list(set(training)-set(choose_list))
                 for idx in choose_list:
                     key = idx
-                    print(key,end=' ')
+                    #print(key,end=' ')
                     seq = dataset[key]['features'][...] # features
                     seq = torch.from_numpy(seq).unsqueeze(0) # 给features增加一维，改变维度为（1，seq_len,1000）
                     if use_gpu: seq = seq.cuda() 
@@ -215,7 +215,7 @@ def main():
                         total_times += 1
                         baselines[key] = 0.9 * baselines[key] + 0.1 * np.mean(epis_rewards) # 更新reward
                         reward_writers[key].append(np.mean(epis_rewards))
-                print("")
+                #print("")
             epoch_reward = np.mean([reward_writers[key][epoch] for key in train_keys])
             print("epoch {}/{} meta_epoch {}/{}\t reward {}\t loss {} ".format(epoch+1, args.max_epoch,n+1,meta_step, epoch_reward,total_loss/total_times))
         if attention == True:
