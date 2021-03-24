@@ -22,9 +22,13 @@ import vsum_tools
 from torch.autograd import Variable
 import re
 import random
+
+from scores.eval import generate_scores, evaluate_scores
+
 parser = argparse.ArgumentParser("Pytorch code for unsupervised video summarization with REINFORCE")
 # Dataset options
 parser.add_argument('-d', '--dataset', type=str, required=True, help="path to h5 dataset (required)")
+parser.add_argument('-us', '--userscore', type=str, required=True, help="path to h5 of user's scores (required)")
 parser.add_argument('-s', '--split', type=str, required=True, help="path to split file (required)")
 parser.add_argument('--split-id', type=int, default=0, help="split index (default: 0)")
 parser.add_argument('-m', '--metric', type=str, required=True, choices=['tvsum', 'summe'],
@@ -98,6 +102,8 @@ def main():
     test_keys = split['test_keys']
     print("# total videos {}. # train videos {}. # test videos {}".format(num_videos, len(train_keys), len(test_keys)))
 
+
+    userscoreset = h5py.File(args.userscore, 'r')
     print("Initialize model")
     #model选型
     print("attention = ",attention)
@@ -234,11 +240,11 @@ def main():
         
     write_json(reward_writers, osp.join(args.save_dir, 'rewards.json'))
     if attention == False:
-        mean_fm = evaluate(model,dataset, test_keys, use_gpu)
+        mean_fm = evaluate(model,dataset, userscoreset, test_keys, use_gpu)
         mean_fm = round(mean_fm,2)
         model_state_dict = model.state_dict()
     else:
-        mean_fm = evaluate(attn_model,dataset, test_keys, use_gpu)
+        mean_fm = evaluate(attn_model,dataset, userscoreset, test_keys, use_gpu)
         mean_fm = round(mean_fm,2)
         model_state_dict = attn_model.state_dict()
     elapsed = round(time.time() - start_time)
@@ -248,8 +254,9 @@ def main():
     #save_checkpoint(model_state_dict, model_save_path)
     #print("Model saved to {}".format(model_save_path))
     dataset.close()
+    userscoreset.close()
 
-def evaluate(model,dataset, test_keys, use_gpu):
+def evaluate(model, dataset, userscoreset, test_keys, use_gpu):
     print("==> Test")
     #use_meta = False
     with torch.no_grad():
@@ -262,6 +269,8 @@ def evaluate(model,dataset, test_keys, use_gpu):
         if args.save_results:
             h5_res = h5py.File(osp.join(args.save_dir, 'result_user_summary.h5'), 'w')
 
+        spear_avg_corrs = []
+        kendal_avg_corrs = []
         for key_idx, key in enumerate(test_keys):
             seq = dataset[key]['features'][...]
             seq = torch.from_numpy(seq).unsqueeze(0)
@@ -284,12 +293,20 @@ def evaluate(model,dataset, test_keys, use_gpu):
             fm, _, _ = vsum_tools.evaluate_summary(machine_summary, user_summary, eval_metric)
             fms.append(fm)
 
+            #### Calculate correlation matrices ####
+            user_scores = userscoreset[key]["user_scores"][...]
+            machine_scores = generate_scores(probs, num_frames, positions)
+            spear_avg_corr = evaluate_scores(machine_scores, user_scores, metric="spearmanr")
+            kendal_avg_corr = evaluate_scores(machine_scores, user_scores, metric="kendalltau")
+
+            spear_avg_corrs.append(spear_avg_corr)
+            kendal_avg_corrs.append(kendal_avg_corr)
+
             if args.verbose:
                 table.append([key_idx+1, key, "{:.1%}".format(fm)])
 
             if args.save_results:
                 h5_res.create_dataset(key + '/user_summary', data=user_summary)
-                #print("已保存user_summary")
                 h5_res.create_dataset(key + '/score', data=probs)
                 h5_res.create_dataset(key + '/machine_summary', data=machine_summary)
                 h5_res.create_dataset(key + '/gtscore', data=dataset[key]['gtscore'][...])
@@ -301,7 +318,12 @@ def evaluate(model,dataset, test_keys, use_gpu):
     if args.save_results: h5_res.close()
 
     mean_fm = np.mean(fms)
-    print("Average F-score {:.1%}".format(mean_fm))
+    print("Average F-score {:.3%}".format(mean_fm))
+
+    mean_spear_avg = np.mean(spear_avg_corrs)
+    mean_kendal_avg = np.mean(kendal_avg_corrs)
+    print("Average Kendal {}".format(mean_kendal_avg))
+    print("Average Spear {}".format(mean_spear_avg))
 
     return mean_fm
 

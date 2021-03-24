@@ -6,3 +6,6 @@ log
 results
 
 *.txt
+*.mat
+
+evaluation
