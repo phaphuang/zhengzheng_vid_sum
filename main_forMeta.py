@@ -43,7 +43,7 @@ parser.add_argument('--lr', type=float, default=1e-05, help="learning rate (defa
 parser.add_argument('--attn_lr', type=float, default=1e-04, help="transformer learning rate (default: 2e-04)")
 parser.add_argument('--meta_lr', type=float, default=1e-05, help="meta learning rate (default: 1e-05)")
 parser.add_argument('--weight-decay', type=float, default=1e-05, help="weight decay rate (default: 1e-05)")
-parser.add_argument('--bsz', type=int, default=2, help="batch size Multiple of 5 is better(default: 5)")
+parser.add_argument('--bsz', type=int, default=5, help="batch size Multiple of 5 is better(default: 5)")
 parser.add_argument('--max-epoch', type=int, default=10, help="maximum epoch for training (default: 60)")
 parser.add_argument('--meta_step', type=int, default=1, help="meta epoch for training (default: 10)")
 parser.add_argument('--stepsize', type=int, default=30, help="how many steps to decay learning rate (default: 30)")
@@ -136,7 +136,7 @@ def main():
         attn_model = make_model(d_model = args.input_dim)
         attn_meta_model = make_model(d_model = args.input_dim)
         attn_optimizer = torch.optim.Adam(attn_model.parameters(), betas=(0.5,0.999),lr=attn_lr, weight_decay=args.weight_decay) #简单添加attn optimizer
-        attn_meta_optimizer = torch.optim.Adam(attn_model.parameters(), betas=(0.5,0.999),lr=meta_lr, weight_decay=args.weight_decay) #简单添加attn optimizer
+        attn_meta_optimizer = torch.optim.Adam(attn_meta_model.parameters(), betas=(0.5,0.999),lr=meta_lr, weight_decay=args.weight_decay) #简单添加attn optimizer
     else:
         model = MRN(in_dim=args.input_dim, hid_dim=args.hidden_dim, num_layers=args.num_layers, cell=args.rnn_cell)
         meta_model = MRN(in_dim=args.input_dim, hid_dim=args.hidden_dim, num_layers=args.num_layers, cell=args.rnn_cell)
@@ -174,77 +174,77 @@ def main():
         model.train()
         meta_model.train()
     else:
+        print("===> Training Attention model")
         attn_model.train()
         attn_meta_model.train()
     n = 0
 
     if args.dataset is None:
         while n < meta_step:
+            if attention == False:
+                model.load_state_dict(meta_model.state_dict())
+            else: 
+                attn_model.load_state_dict(attn_meta_model.state_dict())
+
             #重设meta_model
             total_loss = 0
             total_times = 0
             baselines = {key: 0. for key in train_keys} # 基本reward
             reward_writers = {key: [] for key in train_keys} # 记录reward的变化
-    #        if attention == False:
-    #            model.load_state_dict(meta_model.state_dict())
-    #        else: 
-    #            attn_model.load_state_dict(attn_meta_model.state_dict())
+            
             for epoch in range(start_epoch, args.max_epoch):
                 epis_rewards = []
-                b = 0
-                training = train_keys.copy()
-                while (len(training) != 0):
-                    choose_list = random.sample(training,bsz)
-                    #print('Batch------',b)
-                    b = b+1
-                    training = list(set(training)-set(choose_list))
-                    for choose_path in choose_list:
-                        key_parts = choose_path.split('/')
-                        name, key = key_parts
-                        #print(key,end=' ')
-                        seq = dataset[name][key]['features'][...] # features
-                        seq = torch.from_numpy(seq).unsqueeze(0) # 给features增加一维，改变维度为（1，seq_len,1000）
-                        if use_gpu: seq = seq.cuda() 
-                        if attention == True:
-                            probs = attn_meta_model(seq.float()) #（1，seq_len,1）
-                            #torch.cuda.empty_cache()
-                        else:
-                            probs = meta_model(seq) # 输出维度 (1, seq_len, 1)
-                            #torch.cuda.empty_cache()
-                        cost_1 = args.beta * (probs.mean() - 0.5)**2 # 最小化摘要长度惩罚因子损失函数
-                        m1 = Bernoulli(probs)
+                idxs = np.arange(len(train_keys))
+                np.random.shuffle(idxs) # shuffle indices
+                for idx in idxs:
+                    key_parts = train_keys[idx].split('/')
+                    name, key = key_parts
+                    #print("Filename: ", name, " Key: ", key)
+                    seq = dataset[name][key]['features'][...] # features
+                    seq = torch.from_numpy(seq).type('torch.FloatTensor').unsqueeze(0) # 给features增加一维，改变维度为（1，seq_len,1000）
+                    if use_gpu: seq = seq.cuda() 
+                    if attention == True:
+                        probs = attn_meta_model(seq) #（1，seq_len,1）
+                        #torch.cuda.empty_cache()
+                    else:
+                        probs = meta_model(seq) # 输出维度 (1, seq_len, 1)
+                        #torch.cuda.empty_cache()
+                    cost_1 = args.beta * (probs.mean() - 0.5)**2 # 最小化摘要长度惩罚因子损失函数
+                    m1 = Bernoulli(probs)
+                    
+                    actions_1 = m1.sample() #采样
+                    log_probs_1 = m1.log_prob(actions_1) #生成损失函数
+                    reward_1 = compute_reward(seq, actions_1, use_gpu=use_gpu)
+                    expected_reward_1 = log_probs_1.mean() * (reward_1 - baselines[train_keys[idx]])
+                    cost_1 -= expected_reward_1 # 最小化负向期望reward
+                    epis_rewards.append(reward_1.item())
+# =============================================================================
+#                         without attention
+# =============================================================================
+                    if attention == False:
+                        meta_optimizer.zero_grad()
+                        cost_1.backward()
+                        meta_optimizer.step()
                         
-                        actions_1 = m1.sample() #采样
-                        log_probs_1 = m1.log_prob(actions_1) #生成损失函数
-                        reward_1 = compute_reward(seq, actions_1, use_gpu=use_gpu)
-                        expected_reward_1 = log_probs_1.mean() * (reward_1 - baselines[choose_path])
-                        cost_1 -= expected_reward_1 # 最小化负向期望reward
-                        epis_rewards.append(reward_1.item())
-    # =============================================================================
-    #                         without attention
-    # =============================================================================
-                        if attention == False:
-                            meta_optimizer.zero_grad()
-                            cost_1.backward()
-                            meta_optimizer.step()
-                            
-                            total_loss += cost_1.item() #综合损失
-                            total_times += 1
-                            baselines[choose_path] = 0.9 * baselines[choose_path] + 0.1 * np.mean(epis_rewards) # 更新reward
-                            reward_writers[choose_path].append(np.mean(epis_rewards))
-                        else:
-    # =============================================================================
-    #                         with attention
-    # =============================================================================
-                            attn_optimizer.zero_grad()
-                            cost_1.backward()
-                            attn_optimizer.step()
-                            
-                            total_loss += cost_1.item() #综合损失
-                            total_times += 1
-                            baselines[choose_path] = 0.9 * baselines[choose_path] + 0.1 * np.mean(epis_rewards) # 更新reward
-                            reward_writers[choose_path].append(np.mean(epis_rewards))
-                    #print("")
+                        total_loss += cost_1.item() #综合损失
+                        total_times += 1
+                        baselines[train_keys[idx]] = 0.9 * baselines[train_keys[idx]] + 0.1 * np.mean(epis_rewards) # 更新reward
+                        reward_writers[train_keys[idx]].append(np.mean(epis_rewards))
+                    else:
+# =============================================================================
+#                         with attention
+# =============================================================================
+                        attn_meta_optimizer.zero_grad()
+                        cost_1.backward()
+                        attn_meta_optimizer.step()
+
+                        #print("Cost: ", cost_1)
+                        
+                        total_loss += cost_1.item() #综合损失
+                        total_times += 1
+                        baselines[train_keys[idx]] = 0.9 * baselines[train_keys[idx]] + 0.1 * np.mean(epis_rewards) # 更新reward
+                        reward_writers[train_keys[idx]].append(np.mean(epis_rewards))
+                #print("")
                 epoch_reward = np.mean([reward_writers[key][epoch] for key in train_keys])
                 print("epoch {}/{} meta_epoch {}/{}\t reward {}\t loss {} ".format(epoch+1, args.max_epoch,n+1,meta_step, epoch_reward,total_loss/total_times))
             if attention == True:
@@ -347,9 +347,10 @@ def main():
         mean_fm = round(mean_fm,2)
         model_state_dict = model.state_dict()
     else:
-        mean_fm = evaluate(attn_model,dataset, userscoreset, test_keys, use_gpu)
+        mean_fm = evaluate(attn_meta_model,dataset, userscoreset, test_keys, use_gpu)
         mean_fm = round(mean_fm,2)
-        model_state_dict = attn_model.state_dict()
+        print("Train F-Measure: ", mean_fm)
+        model_state_dict = attn_meta_model.state_dict()
     elapsed = round(time.time() - start_time)
     elapsed = str(datetime.timedelta(seconds=elapsed))
     print("Finished. Total elapsed time (h:m:s): {}".format(elapsed))
@@ -379,6 +380,7 @@ def evaluate(model, dataset, userscoreset, test_keys, use_gpu):
             for key_idx, key in enumerate(test_keys):
                 key_parts = test_keys[key_idx].split('/')
                 name, key = key_parts
+                #print("Filename: ", name, " Key: ", key)
                 seq = dataset[name][key]['features'][...]
                 seq = torch.from_numpy(seq).unsqueeze(0)
                 if use_gpu: seq = seq.cuda()
@@ -460,8 +462,8 @@ def evaluate(model, dataset, userscoreset, test_keys, use_gpu):
                     h5_res.create_dataset(key + '/gtscore', data=dataset[key]['gtscore'][...])
                     h5_res.create_dataset(key + '/fm', data=fm)
 
-    #if args.verbose:
-    #    print(tabulate(table))
+    if args.verbose:
+        print(tabulate(table))
         
     if args.save_results: h5_res.close()
 
